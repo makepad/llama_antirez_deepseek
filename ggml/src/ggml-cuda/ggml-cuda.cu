@@ -22,6 +22,7 @@
 #include "ggml-cuda/cumsum.cuh"
 #include "ggml-cuda/diagmask.cuh"
 #include "ggml-cuda/diag.cuh"
+#include "ggml-cuda/dsv4.cuh"
 #include "ggml-cuda/fattn.cuh"
 #include "ggml-cuda/getrows.cuh"
 #include "ggml-cuda/im2col.cuh"
@@ -2934,6 +2935,18 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_GATED_DELTA_NET:
             ggml_cuda_op_gated_delta_net(ctx, dst);
             break;
+        case GGML_OP_DSV4_HC_SPLIT_SINKHORN:
+            ggml_cuda_op_dsv4_hc_split_sinkhorn(ctx, dst);
+            break;
+        case GGML_OP_DSV4_HC_EXPAND:
+            ggml_cuda_op_dsv4_hc_expand(ctx, dst);
+            break;
+        case GGML_OP_DSV4_FP8_KV_QUANTIZE:
+            ggml_cuda_op_dsv4_fp8_kv_quantize(ctx, dst);
+            break;
+        case GGML_OP_DSV4_ROPE_TAIL:
+            ggml_cuda_op_dsv4_rope_tail(ctx, dst);
+            break;
         case GGML_OP_RWKV_WKV7:
             ggml_cuda_op_rwkv_wkv7(ctx, dst);
             break;
@@ -5037,7 +5050,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_REPEAT:
             {
                 ggml_type src0_type = op->src[0]->type;
-                return src0_type != GGML_TYPE_I32 && src0_type != GGML_TYPE_I16;
+                if (src0_type == GGML_TYPE_I32) {
+                    return op->type == GGML_TYPE_I32 && ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op);
+                }
+                return src0_type != GGML_TYPE_I16;
             } break;
         case GGML_OP_REPEAT_BACK:
                 return op->type == GGML_TYPE_F32 && (op->src[0]->ne[2]*op->src[0]->ne[3]) <= (1 << 15);
@@ -5161,6 +5177,45 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
 #else
             return true;
 #endif // GGML_USE_MUSA
+        case GGML_OP_DSV4_HC_SPLIT_SINKHORN:
+            return ggml_is_contiguous_rows(op->src[0]) &&
+                ggml_is_contiguous(op->src[1]) &&
+                ggml_is_contiguous(op->src[2]) &&
+                op->src[0]->type == GGML_TYPE_F32 &&
+                op->src[1]->type == GGML_TYPE_F32 &&
+                op->src[2]->type == GGML_TYPE_F32 &&
+                op->type == GGML_TYPE_F32;
+        case GGML_OP_DSV4_HC_EXPAND:
+            return op->src[0]->type == GGML_TYPE_F32 &&
+                op->src[1]->type == GGML_TYPE_F32 &&
+                op->src[2]->type == GGML_TYPE_F32 &&
+                op->src[3]->type == GGML_TYPE_F32 &&
+                op->type == GGML_TYPE_F32 &&
+                op->src[0]->ne[0] == op->ne[0] &&
+                op->src[0]->ne[1] == op->ne[2] &&
+                op->src[1]->ne[0] == op->ne[0] &&
+                op->src[1]->ne[1] == op->ne[1] &&
+                op->src[1]->ne[2] == op->ne[2] &&
+                op->src[2]->ne[0] == op->ne[1] &&
+                op->src[2]->ne[1] == op->ne[2] &&
+                op->src[3]->ne[0] == op->ne[1] &&
+                op->src[3]->ne[1] == op->ne[1] &&
+                op->src[3]->ne[2] == op->ne[2];
+        case GGML_OP_DSV4_FP8_KV_QUANTIZE:
+            return op->src[0]->type == GGML_TYPE_F32 &&
+                op->type == GGML_TYPE_F32 &&
+                op->src[0]->ne[0] > ggml_get_op_params_i32(op, 0) &&
+                (op->src[0]->ne[0] - ggml_get_op_params_i32(op, 0)) % 64 == 0;
+        case GGML_OP_DSV4_ROPE_TAIL:
+            return op->src[0]->type == GGML_TYPE_F32 &&
+                op->src[1]->type == GGML_TYPE_I32 &&
+                op->type == GGML_TYPE_F32 &&
+                op->src[0]->ne[2] == op->src[1]->ne[0] &&
+                ggml_get_op_params_i32(op, 0) > 0 &&
+                ggml_get_op_params_i32(op, 0) <= op->src[0]->ne[0] &&
+                ggml_get_op_params_i32(op, 0) % 2 == 0 &&
+                (ggml_get_op_params_i32(op, 1) == GGML_ROPE_TYPE_NORMAL ||
+                 ggml_get_op_params_i32(op, 1) == GGML_ROPE_TYPE_NEOX);
         case GGML_OP_FLASH_ATTN_EXT:
             return ggml_cuda_flash_attn_ext_supported(dev_ctx->device, op);
         case GGML_OP_CROSS_ENTROPY_LOSS:

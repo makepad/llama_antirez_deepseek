@@ -754,7 +754,7 @@ static bool ggml_is_view_op(enum ggml_op op) {
 #endif
 
 #ifndef GGML_SCHED_MAX_SPLIT_INPUTS
-#define GGML_SCHED_MAX_SPLIT_INPUTS 30
+#define GGML_SCHED_MAX_SPLIT_INPUTS 128
 #endif
 
 #ifndef GGML_SCHED_MAX_COPIES
@@ -1301,6 +1301,17 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
             }
 
             if (node_backend_id != cur_backend_id || need_new_split) {
+                if (sched->debug && i_split < 80) {
+                    GGML_LOG_INFO("%s: split %d -> %d at node %d op=%s name=%s backend %s -> %s reason=%s inputs=%d\n",
+                            __func__,
+                            i_split, i_split + 1, i,
+                            ggml_op_name(node->op),
+                            node->name,
+                            ggml_backend_name(sched->backends[cur_backend_id]),
+                            ggml_backend_name(sched->backends[node_backend_id]),
+                            node_backend_id != cur_backend_id ? "backend-change" : "input-boundary",
+                            split->n_inputs);
+                }
                 split->i_end = i;
                 i_split++;
                 if (i_split >= sched->splits_capacity) {

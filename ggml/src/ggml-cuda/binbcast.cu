@@ -23,6 +23,28 @@ static __device__ __forceinline__ float op_div(const float a, const float b) {
     return a / b;
 }
 
+static __global__ void k_repeat_i32(
+        const int32_t * __restrict__ src, int32_t * __restrict__ dst,
+        int64_t n, int64_t ne0, int64_t ne1, int64_t ne2,
+        int64_t ne00, int64_t ne01, int64_t ne02, int64_t ne03) {
+    const int64_t i = int64_t(blockDim.x) * blockIdx.x + threadIdx.x;
+    if (i >= n) {
+        return;
+    }
+    const int64_t i0 = i % ne0;
+    const int64_t tmp1 = i / ne0;
+    const int64_t i1 = tmp1 % ne1;
+    const int64_t tmp2 = tmp1 / ne1;
+    const int64_t i2 = tmp2 % ne2;
+    const int64_t i3 = tmp2 / ne2;
+
+    const int64_t s0 = i0 % ne00;
+    const int64_t s1 = i1 % ne01;
+    const int64_t s2 = i2 % ne02;
+    const int64_t s3 = i3 % ne03;
+    dst[i] = src[((s3 * ne02 + s2) * ne01 + s1) * ne00 + s0];
+}
+
 template <float (*bin_op)(const float, const float),
           typename src0_t,
           typename src1_t,
@@ -391,6 +413,30 @@ static void ggml_cuda_op_bin_bcast(
 }
 
 void ggml_cuda_op_repeat(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+    if (src0->type == GGML_TYPE_I32 && dst->type == GGML_TYPE_I32) {
+        GGML_ASSERT(ggml_is_contiguous(src0));
+        GGML_ASSERT(ggml_is_contiguous(dst));
+
+        const int64_t n = ggml_nelements(dst);
+        constexpr int block_size = 128;
+        const int num_blocks = (n + block_size - 1) / block_size;
+
+        const int32_t * src = (const int32_t *) src0->data;
+        int32_t * out = (int32_t *) dst->data;
+        const int64_t ne0 = dst->ne[0];
+        const int64_t ne1 = dst->ne[1];
+        const int64_t ne2 = dst->ne[2];
+        const int64_t ne00 = src0->ne[0];
+        const int64_t ne01 = src0->ne[1];
+        const int64_t ne02 = src0->ne[2];
+        const int64_t ne03 = src0->ne[3];
+
+        k_repeat_i32<<<num_blocks, block_size, 0, ctx.stream()>>>(
+            src, out, n, ne0, ne1, ne2, ne00, ne01, ne02, ne03);
+        return;
+    }
+
     ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_repeat, 0>>(dst, dst->src[0], dst, nullptr, dst->src[0]->data, dst->data, ctx.stream());
 }
 

@@ -47,8 +47,13 @@ static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2(ggml_backend_cuda_con
 
     // Edge cases like no mask, ALiBi, unpadded K/V, or misaligned addresses for large data transfers
     //     are put into the template specialization without GQA optimizations.
-    bool use_gqa_opt = mask && max_bias == 0.0f && K->ne[1] % FATTN_KQ_STRIDE == 0;
+    const bool is_decode = Q->ne[1] == 1;
+    const bool is_short_kv_tile = is_decode && K->ne[1] <= FATTN_KQ_STRIDE;
+    bool use_gqa_opt = mask && max_bias == 0.0f && (is_short_kv_tile || K->ne[1] % FATTN_KQ_STRIDE == 0);
     for (const ggml_tensor * t : {Q, K, V, mask}) {
+        if (is_decode && t == mask) {
+            continue;
+        }
         if (t == nullptr || ggml_is_quantized(t->type)) {
             continue;
         }
@@ -304,6 +309,40 @@ enum best_fattn_kernel {
     BEST_FATTN_KERNEL_MMA_F16  = 400,
 };
 
+static void ggml_cuda_log_fattn_reject(const ggml_tensor * dst, const char * reason) {
+    static int n_logs = 0;
+    if (n_logs++ >= 32) {
+        return;
+    }
+
+    const ggml_tensor * Q    = dst->src[0];
+    const ggml_tensor * K    = dst->src[1];
+    const ggml_tensor * V    = dst->src[2];
+    const ggml_tensor * mask = dst->src[3];
+
+    if (Q == nullptr || K == nullptr || V == nullptr) {
+        return;
+    }
+
+    GGML_LOG_WARN("%s: %s | Q=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] %s K=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] %s V=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] %s mask=%s mask.ne=[%lld,%lld,%lld,%lld] mask.nb=[%zu,%zu,%zu,%zu]\n",
+            __func__, reason,
+            (long long) Q->ne[0], (long long) Q->ne[1], (long long) Q->ne[2], (long long) Q->ne[3],
+            Q->nb[0], Q->nb[1], Q->nb[2], Q->nb[3], ggml_type_name(Q->type),
+            (long long) K->ne[0], (long long) K->ne[1], (long long) K->ne[2], (long long) K->ne[3],
+            K->nb[0], K->nb[1], K->nb[2], K->nb[3], ggml_type_name(K->type),
+            (long long) V->ne[0], (long long) V->ne[1], (long long) V->ne[2], (long long) V->ne[3],
+            V->nb[0], V->nb[1], V->nb[2], V->nb[3], ggml_type_name(V->type),
+            mask ? ggml_type_name(mask->type) : "none",
+            mask ? (long long) mask->ne[0] : -1LL,
+            mask ? (long long) mask->ne[1] : -1LL,
+            mask ? (long long) mask->ne[2] : -1LL,
+            mask ? (long long) mask->ne[3] : -1LL,
+            mask ? mask->nb[0] : 0,
+            mask ? mask->nb[1] : 0,
+            mask ? mask->nb[2] : 0,
+            mask ? mask->nb[3] : 0);
+}
+
 static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const ggml_tensor * dst) {
 #ifndef FLASH_ATTN_AVAILABLE
     GGML_UNUSED(device); GGML_UNUSED(dst);
@@ -324,8 +363,13 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
     // The effective batch size for the kernel can be increased by gqa_ratio.
     // The kernel versions without this optimization are also used for ALiBi, if there is no mask, or if the KV cache is not padded,
-    bool gqa_opt_applies = gqa_ratio >= 2 && mask && max_bias == 0.0f && K->ne[1] % FATTN_KQ_STRIDE == 0;
+    const bool is_decode = Q->ne[1] == 1;
+    const bool is_short_kv_tile = is_decode && K->ne[1] <= FATTN_KQ_STRIDE;
+    bool gqa_opt_applies = gqa_ratio >= 2 && mask && max_bias == 0.0f && (is_short_kv_tile || K->ne[1] % FATTN_KQ_STRIDE == 0);
     for (const ggml_tensor * t : {Q, K, V, mask}) {
+        if (is_decode && t == mask) {
+            continue;
+        }
         if (t == nullptr || ggml_is_quantized(t->type)) {
             continue;
         }
@@ -354,26 +398,32 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
             break;
         case 512:
             if (V->ne[0] != K->ne[0]) {
+                ggml_cuda_log_fattn_reject(dst, "V head size mismatch for 512");
                 return BEST_FATTN_KERNEL_NONE;
             }
             if (!gqa_opt_applies) {
+                ggml_cuda_log_fattn_reject(dst, "gqa_opt_applies=false for 512");
                 return BEST_FATTN_KERNEL_NONE;
             }
             break;
         case 576:
             if (V->ne[0] != 512) {
+                ggml_cuda_log_fattn_reject(dst, "V head size mismatch for 576");
                 return BEST_FATTN_KERNEL_NONE;
             }
             if (!gqa_opt_applies) {
+                ggml_cuda_log_fattn_reject(dst, "gqa_opt_applies=false for 576");
                 return BEST_FATTN_KERNEL_NONE;
             }
             break;
         default:
+            ggml_cuda_log_fattn_reject(dst, "unsupported K head size");
             return BEST_FATTN_KERNEL_NONE;
     }
 
 #ifndef GGML_CUDA_FA_ALL_QUANTS
     if (K->type != V->type) {
+        ggml_cuda_log_fattn_reject(dst, "K/V type mismatch without GGML_CUDA_FA_ALL_QUANTS");
         return BEST_FATTN_KERNEL_NONE;
     }
 #endif // GGML_CUDA_FA_ALL_QUANTS
@@ -386,6 +436,7 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         case GGML_TYPE_Q5_0:
         case GGML_TYPE_Q5_1:
 #ifndef GGML_CUDA_FA_ALL_QUANTS
+            ggml_cuda_log_fattn_reject(dst, "quantized K type unsupported without GGML_CUDA_FA_ALL_QUANTS");
             return BEST_FATTN_KERNEL_NONE;
 #endif // GGML_CUDA_FA_ALL_QUANTS
         case GGML_TYPE_Q4_0:
@@ -393,10 +444,12 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         case GGML_TYPE_BF16:
             break;
         default:
+            ggml_cuda_log_fattn_reject(dst, "unsupported K type");
             return BEST_FATTN_KERNEL_NONE;
     }
 
     if (mask && mask->ne[2] != 1) {
+        ggml_cuda_log_fattn_reject(dst, "mask->ne[2] != 1");
         return BEST_FATTN_KERNEL_NONE;
     }
 
