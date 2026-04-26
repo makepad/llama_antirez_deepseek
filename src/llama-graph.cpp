@@ -2028,7 +2028,16 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
     ggml_tensor * cur;
 
-    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
+    const bool disable_dsv4_flash_attn = arch == LLM_ARCH_DEEPSEEK4 && q->ne[0] == 512;
+    if (disable_dsv4_flash_attn && cparams.flash_attn) {
+        static bool warned = false;
+        if (!warned) {
+            LLAMA_LOG_WARN("%s: disabling Flash Attention for DeepSeek4 512-wide attention; CUDA rejects these shapes and falls back to host splits\n", __func__);
+            warned = true;
+        }
+    }
+
+    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr && !disable_dsv4_flash_attn;
     if (use_flash_attn) {
         GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
 
