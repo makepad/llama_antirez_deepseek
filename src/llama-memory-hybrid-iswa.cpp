@@ -267,9 +267,13 @@ llama_memory_context_ptr llama_memory_hybrid_iswa::init_batch(llama_batch_allocr
         while (true) {
             llama_ubatch ubatch;
 
-            if (dsv4_compressed && dsv4_batch_decode && balloc.get_n_outputs() == balloc.get_n_tokens()) {
+            const uint32_t n_stream = mem_attn->get_base()->get_n_stream();
+            if (dsv4_compressed && dsv4_batch_decode && balloc.get_n_outputs() == balloc.get_n_tokens() && balloc.get_n_tokens() <= n_stream) {
                 const bool unified = (mem_attn->get_base()->get_n_stream() == 1);
-                ubatch = balloc.split_equal(n_ubatch, !unified);
+                ubatch = balloc.split_equal_tail(n_ubatch, !unified);
+                if (ubatch.n_tokens == 0) {
+                    ubatch = balloc.split_seq(n_ubatch);
+                }
             } else if (dsv4_compressed) {
                 // DeepSeek V4 compressed attention keeps sequence-local compressor
                 // state and compressed cache rows. Process one sequence set per

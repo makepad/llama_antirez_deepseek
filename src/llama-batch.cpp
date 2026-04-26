@@ -610,6 +610,73 @@ llama_ubatch llama_batch_allocr::split_equal(uint32_t n_ubatch, bool sequential)
     return ubatch_add(idxs, n_seqs, true);
 }
 
+llama_ubatch llama_batch_allocr::split_equal_tail(uint32_t n_ubatch, bool sequential) {
+    if (sequential && has_cpl) {
+        LLAMA_LOG_ERROR("%s: sequential split is not supported when there are coupled sequences in the input batch (you may need to use the -kvu flag)\n", __func__);
+
+        return {};
+    }
+
+    std::vector<seq_set_t> cur_seq_set;
+    std::vector<int32_t> idxs;
+
+    llama_seq_id last_seq_id = -1;
+
+    for (int32_t i = 0; i < batch.n_tokens; ++i) {
+        if (used[i]) {
+            continue;
+        }
+
+        const auto & set = seq_set[i];
+        const auto & seq_idxs = seq_set_map[set];
+
+        int32_t unused_count = 0;
+        for (const int32_t idx : seq_idxs) {
+            unused_count += used[idx] ? 0 : 1;
+            if (unused_count > 1) {
+                break;
+            }
+        }
+
+        if (unused_count != 1) {
+            continue;
+        }
+
+        bool add = true;
+        for (uint32_t s = 0; s < cur_seq_set.size(); ++s) {
+            if (!(cur_seq_set[s] & set).none()) {
+                add = false;
+                break;
+            }
+        }
+
+        if (sequential) {
+            add = add && (cur_seq_set.empty() || batch.seq_id[i][0] == last_seq_id + 1);
+        }
+
+        if (!add) {
+            continue;
+        }
+
+        cur_seq_set.push_back(set);
+        idxs.push_back(i);
+        used[i] = true;
+        ++n_used;
+
+        last_seq_id = batch.seq_id[i][0];
+
+        if (idxs.size() >= n_ubatch) {
+            break;
+        }
+    }
+
+    if (idxs.empty()) {
+        return {};
+    }
+
+    return ubatch_add(idxs, idxs.size(), true);
+}
+
 llama_ubatch llama_batch_allocr::split_seq(uint32_t n_ubatch) {
     // find the first unused token
     uint32_t cur_idx = 0;
