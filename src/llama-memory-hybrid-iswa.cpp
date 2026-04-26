@@ -18,6 +18,7 @@ namespace {
 
 constexpr uint32_t DSV4_COMPRESSED_KV_STATE_MAGIC   = 0x44535634; // "DSV4"
 constexpr uint32_t DSV4_COMPRESSED_KV_STATE_VERSION = 1;
+constexpr uint32_t DSV4_COMPRESSED_DECODE_UBATCH_MAX = 512;
 
 struct dsv4_row_range {
     uint32_t begin = 0;
@@ -279,7 +280,17 @@ llama_memory_context_ptr llama_memory_hybrid_iswa::init_batch(llama_batch_allocr
                 // state and compressed cache rows. Process one sequence set per
                 // ubatch while still allowing multi-sequence batches at the API
                 // level.
-                ubatch = balloc.split_seq(n_ubatch);
+                uint32_t n_ubatch_dsv4 = n_ubatch;
+                const auto & batch = balloc.get_batch();
+                const bool first_split = balloc.get_n_used() == 0;
+                const bool starts_at_zero = batch.pos == nullptr || batch.pos[0] == 0;
+                if (!first_split || !starts_at_zero) {
+                    // Non-prefill compressed-attention chunks build one
+                    // compressor update per token and can otherwise exhaust the
+                    // graph metadata arena on long contexts.
+                    n_ubatch_dsv4 = std::min<uint32_t>(n_ubatch_dsv4, DSV4_COMPRESSED_DECODE_UBATCH_MAX);
+                }
+                ubatch = balloc.split_seq(n_ubatch_dsv4);
             } else if (embd_all) {
                 // if all tokens are output, split by sequence
                 ubatch = balloc.split_seq(n_ubatch);
