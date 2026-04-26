@@ -29,30 +29,33 @@ static __device__ void dsv4_rope_yarn(
     sin_theta = sinf(theta) * mscale;
 }
 
-static __device__ float dsv4_e4m3fn_value(const int i) {
-    const int exp  = (i >> 3) & 0x0f;
-    const int mant = i & 0x07;
-    return exp == 0
-        ? float(mant) * 0.001953125f
-        : (1.0f + float(mant) * 0.125f) * exp2f(float(exp - 7));
-}
-
 static __device__ float dsv4_e4m3fn_dequant(const float x) {
     const float sign = x < 0.0f ? -1.0f : 1.0f;
     const float ax = fminf(fabsf(x), 448.0f);
 
-    int best = 0;
-    float best_diff = ax;
-    for (int i = 1; i < 127; ++i) {
-        const float val = dsv4_e4m3fn_value(i);
-        const float diff = fabsf(ax - val);
-        if (diff < best_diff || (diff == best_diff && (i & 1) == 0 && (best & 1) != 0)) {
-            best = i;
-            best_diff = diff;
-        }
+    // E4M3FN positive finite values are monotonic, so nearest-value
+    // dequantization can be computed directly instead of searching all 126
+    // candidates for every scalar.
+    if (ax < 0.0146484375f) { // midpoint between max subnormal and min normal
+        const int mant = max(0, min(7, __float2int_rn(ax * 512.0f)));
+        return sign * (float(mant) * 0.001953125f);
     }
 
-    return sign * dsv4_e4m3fn_value(best);
+    int exp_unbiased;
+    const float frac = frexpf(ax, &exp_unbiased); // ax = frac * 2^exp_unbiased, frac in [0.5, 1)
+    exp_unbiased -= 1;
+
+    int exp = max(1, min(15, exp_unbiased + 7));
+    const float base = exp2f(float(exp - 7));
+    int mant = __float2int_rn((ax / base - 1.0f) * 8.0f);
+
+    if (mant >= 8) {
+        mant = 0;
+        exp = min(15, exp + 1);
+    }
+    mant = max(0, min(7, mant));
+
+    return sign * ((1.0f + float(mant) * 0.125f) * exp2f(float(exp - 7)));
 }
 
 static __global__ void dsv4_hc_split_sinkhorn_kernel(
@@ -152,6 +155,71 @@ static __global__ void dsv4_hc_split_sinkhorn_kernel(
     for (int i = 0; i < n_hc * n_hc; ++i) {
         out[2 * n_hc + i] = c[i];
     }
+}
+
+static __global__ void dsv4_hc_split_sinkhorn_hc4_kernel(
+        const float * __restrict__ mixes,
+        const float * __restrict__ scale,
+        const float * __restrict__ base,
+        float       * __restrict__ dst,
+        int sinkhorn_iters, int64_t n_rows, float eps) {
+    const int64_t r = int64_t(blockIdx.x);
+    const int lane = int(threadIdx.x);
+    if (r >= n_rows || lane >= 16) {
+        return;
+    }
+
+    const float * mix = mixes + r * 24;
+    float * out = dst + r * 24;
+
+    __shared__ float c[16];
+
+    if (lane < 4) {
+        const float z = mix[lane] * scale[0] + base[lane];
+        out[lane] = 1.0f / (1.0f + expf(-z)) + eps;
+    }
+    if (lane >= 4 && lane < 8) {
+        const int i = lane - 4;
+        const float z = mix[4 + i] * scale[1] + base[4 + i];
+        out[4 + i] = 2.0f / (1.0f + expf(-z));
+    }
+
+    const int src_hc = lane & 3;
+    const int dst_hc = lane >> 2;
+    const int idx = src_hc + dst_hc * 4;
+    const int off = 8 + idx;
+
+    const float v = mix[off] * scale[2] + base[off];
+    c[idx] = v;
+    __syncthreads();
+
+    const float row_max =
+        fmaxf(fmaxf(c[dst_hc * 4 + 0], c[dst_hc * 4 + 1]),
+              fmaxf(c[dst_hc * 4 + 2], c[dst_hc * 4 + 3]));
+    float e = expf(v - row_max);
+    const float row_sum =
+        expf(c[dst_hc * 4 + 0] - row_max) +
+        expf(c[dst_hc * 4 + 1] - row_max) +
+        expf(c[dst_hc * 4 + 2] - row_max) +
+        expf(c[dst_hc * 4 + 3] - row_max);
+    c[idx] = e / row_sum + eps;
+    __syncthreads();
+
+    float col_sum = c[src_hc + 0 * 4] + c[src_hc + 1 * 4] + c[src_hc + 2 * 4] + c[src_hc + 3 * 4];
+    c[idx] *= 1.0f / (col_sum + eps);
+    __syncthreads();
+
+    for (int iter = 1; iter < sinkhorn_iters; ++iter) {
+        const float row_denom = c[dst_hc * 4 + 0] + c[dst_hc * 4 + 1] + c[dst_hc * 4 + 2] + c[dst_hc * 4 + 3] + eps;
+        c[idx] *= 1.0f / row_denom;
+        __syncthreads();
+
+        const float col_denom = c[src_hc + 0 * 4] + c[src_hc + 1 * 4] + c[src_hc + 2 * 4] + c[src_hc + 3 * 4] + eps;
+        c[idx] *= 1.0f / col_denom;
+        __syncthreads();
+    }
+
+    out[8 + idx] = c[idx];
 }
 
 static __global__ void dsv4_hc_expand_kernel(
@@ -345,6 +413,16 @@ void ggml_cuda_op_dsv4_hc_split_sinkhorn(ggml_backend_cuda_context & ctx, ggml_t
     const float eps = ggml_get_op_params_f32(dst, 2);
     const int64_t n_rows = ggml_nrows(mixes);
     const int64_t mix_hc = mixes->ne[0];
+
+    if (n_hc == 4 && mix_hc == 24) {
+        dsv4_hc_split_sinkhorn_hc4_kernel<<<n_rows, 16, 0, ctx.stream()>>>(
+            static_cast<const float *>(mixes->data),
+            static_cast<const float *>(dst->src[1]->data),
+            static_cast<const float *>(dst->src[2]->data),
+            static_cast<float *>(dst->data),
+            sinkhorn_iters, n_rows, eps);
+        return;
+    }
 
     const int threads = 128;
     const int blocks = (n_rows + threads - 1) / threads;
