@@ -171,6 +171,9 @@ void llm_graph_input_pos_bucket_kv::set_input(const llama_ubatch * ubatch) {
 
 void llm_graph_input_out_ids::set_input(const llama_ubatch * ubatch) {
     GGML_ASSERT(out_ids);
+    if (!out_ids->buffer) {
+        return;
+    }
 
     const int64_t n_tokens = ubatch->n_tokens;
 
@@ -845,7 +848,10 @@ void llm_graph_result::reset() {
 
     inputs.clear();
 
-    buf_compute_meta.resize(ggml_tensor_overhead()*max_nodes + ggml_graph_overhead_custom(max_nodes, false));
+    const char * LLAMA_GRAPH_META_SLACK = getenv("LLAMA_GRAPH_META_SLACK");
+    const size_t graph_meta_slack = LLAMA_GRAPH_META_SLACK ? strtoull(LLAMA_GRAPH_META_SLACK, nullptr, 10) : 4ull*1024ull*1024ull;
+
+    buf_compute_meta.resize(ggml_tensor_overhead()*max_nodes + ggml_graph_overhead_custom(max_nodes, false) + graph_meta_slack);
 
     ggml_init_params params = {
         /*.mem_size   =*/ buf_compute_meta.size(),
@@ -1880,6 +1886,10 @@ ggml_tensor * llm_graph_context::build_inp_attn_scale() const {
 }
 
 ggml_tensor * llm_graph_context::build_inp_out_ids() const {
+    if (n_outputs == 0) {
+        return nullptr;
+    }
+
     // note: when all tokens are output, we could skip this optimization to spare the ggml_get_rows() calls,
     //       but this would make the graph topology depend on the number of output tokens, which can interfere with
     //       features that require constant topology such as pipeline parallelism

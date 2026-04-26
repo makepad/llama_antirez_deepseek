@@ -3142,7 +3142,13 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
 }
 
 static const void * ggml_cuda_graph_get_key(ggml_cgraph * cgraph) {
-    return cgraph->nodes[0];
+    static const bool key_by_node_count = getenv("GGML_CUDA_GRAPH_KEY_BY_NODE_COUNT") != nullptr;
+    if (!key_by_node_count) {
+        return cgraph->nodes[0];
+    }
+
+    const uintptr_t ptr = reinterpret_cast<uintptr_t>(cgraph->nodes[0]);
+    return reinterpret_cast<const void *>(ptr ^ (uintptr_t(cgraph->n_nodes) << 4));
 }
 
 static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph) {
@@ -3150,6 +3156,8 @@ static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx
 
     const void * graph_key = ggml_cuda_graph_get_key(cgraph);
     ggml_cuda_graph * graph = cuda_ctx->cuda_graph(graph_key);
+    static const bool graph_debug = getenv("GGML_CUDA_GRAPH_DEBUG") != nullptr;
+    static int graph_debug_logs = 0;
 
     if (cgraph->uid != 0 &&
         cgraph->uid == graph->uid) {
@@ -3162,6 +3170,11 @@ static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx
 
     // Check if the graph size has changed
     if ((int)graph->node_props.size() != cgraph->n_nodes) {
+        if (graph_debug && graph_debug_logs < 64) {
+            GGML_LOG_INFO("%s: CUDA graph shape changed: old nodes=%zu new nodes=%d uid=%zu\n",
+                          __func__, graph->node_props.size(), cgraph->n_nodes, cgraph->uid);
+            graph_debug_logs++;
+        }
         res = true;
         graph->node_props.resize(cgraph->n_nodes);
     }
@@ -3179,6 +3192,41 @@ static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx
         }
 
         if (res || memcmp(&graph->node_props[i], &prop, sizeof(prop)) != 0) {
+            if (!res && graph_debug && graph_debug_logs < 64) {
+                const ggml_cuda_graph::node_properties & old = graph->node_props[i];
+                const ggml_tensor * node = cgraph->nodes[i];
+                GGML_LOG_INFO("%s: CUDA graph node changed: idx=%d op=%s name=%s uid=%zu\n",
+                              __func__, i, ggml_op_name(node->op), ggml_get_name(node), cgraph->uid);
+                if (memcmp(old.node.ne, prop.node.ne, sizeof(prop.node.ne)) != 0) {
+                    GGML_LOG_INFO("%s:   node.ne old=[%lld,%lld,%lld,%lld] new=[%lld,%lld,%lld,%lld]\n",
+                                  __func__,
+                                  (long long) old.node.ne[0], (long long) old.node.ne[1],
+                                  (long long) old.node.ne[2], (long long) old.node.ne[3],
+                                  (long long) prop.node.ne[0], (long long) prop.node.ne[1],
+                                  (long long) prop.node.ne[2], (long long) prop.node.ne[3]);
+                }
+                if (memcmp(old.node.nb, prop.node.nb, sizeof(prop.node.nb)) != 0) {
+                    GGML_LOG_INFO("%s:   node.nb old=[%zu,%zu,%zu,%zu] new=[%zu,%zu,%zu,%zu]\n",
+                                  __func__, old.node.nb[0], old.node.nb[1], old.node.nb[2], old.node.nb[3],
+                                  prop.node.nb[0], prop.node.nb[1], prop.node.nb[2], prop.node.nb[3]);
+                }
+                if (old.node.data != prop.node.data) {
+                    GGML_LOG_INFO("%s:   node.data old=%p new=%p\n", __func__, old.node.data, prop.node.data);
+                }
+                for (int j = 0; j < GGML_MAX_SRC; ++j) {
+                    if (old.node_src_data_ptrs[j] != prop.node_src_data_ptrs[j]) {
+                        GGML_LOG_INFO("%s:   src[%d].data old=%p new=%p\n",
+                                      __func__, j, old.node_src_data_ptrs[j], prop.node_src_data_ptrs[j]);
+                    }
+                    if (memcmp(old.node_src_ne[j], prop.node_src_ne[j], sizeof(prop.node_src_ne[j])) != 0) {
+                        GGML_LOG_INFO("%s:   src[%d].ne changed\n", __func__, j);
+                    }
+                    if (memcmp(old.node_src_nb[j], prop.node_src_nb[j], sizeof(prop.node_src_nb[j])) != 0) {
+                        GGML_LOG_INFO("%s:   src[%d].nb changed\n", __func__, j);
+                    }
+                }
+                graph_debug_logs++;
+            }
             graph->node_props[i] = prop;
             res = true;
         }
@@ -4239,6 +4287,7 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
 
 #ifdef USE_CUDA_GRAPH
     graph_key = ggml_cuda_graph_get_key(cgraph);
+    static const bool graph_update_on_change = getenv("GGML_CUDA_GRAPH_UPDATE_ON_CHANGE") != nullptr;
 
     ggml_cuda_graph_set_enabled(cuda_ctx, graph_key);
 
@@ -4248,24 +4297,30 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
         if (graph_compatible) {
             const bool properties_changed = ggml_cuda_graph_update_required(cuda_ctx, cgraph);
 
-            if (!graph->warmup_complete) {
-                // Warmup: need at least 2 calls with no property change on the 2nd call
-                if (!properties_changed) {
-                    graph->warmup_complete = true;
-                    GGML_LOG_DEBUG("%s: CUDA graph warmup complete\n", __func__);
-                    use_cuda_graph = true;
-                    cuda_graph_update_required = true;
-                }
-                // else: properties changed or first call - execute directly (use_cuda_graph stays false)
+            if (graph_update_on_change) {
+                use_cuda_graph = true;
+                cuda_graph_update_required = properties_changed || graph->instance == nullptr;
+                graph->warmup_complete = true;
             } else {
-                // Post-warmup: normal CUDA graph operation
-                if (properties_changed) {
-                    // Properties changed - reset warmup, execute directly until stable again
-                    graph->warmup_complete = false;
-                    GGML_LOG_DEBUG("%s: CUDA graph warmup reset\n", __func__);
+                if (!graph->warmup_complete) {
+                    // Warmup: need at least 2 calls with no property change on the 2nd call
+                    if (!properties_changed) {
+                        graph->warmup_complete = true;
+                        GGML_LOG_DEBUG("%s: CUDA graph warmup complete\n", __func__);
+                        use_cuda_graph = true;
+                        cuda_graph_update_required = true;
+                    }
+                    // else: properties changed or first call - execute directly (use_cuda_graph stays false)
                 } else {
-                    use_cuda_graph = true;
-                    cuda_graph_update_required = graph->instance == nullptr;
+                    // Post-warmup: normal CUDA graph operation
+                    if (properties_changed) {
+                        // Properties changed - reset warmup, execute directly until stable again
+                        graph->warmup_complete = false;
+                        GGML_LOG_DEBUG("%s: CUDA graph warmup reset\n", __func__);
+                    } else {
+                        use_cuda_graph = true;
+                        cuda_graph_update_required = graph->instance == nullptr;
+                    }
                 }
             }
         }

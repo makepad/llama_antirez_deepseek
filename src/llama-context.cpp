@@ -161,6 +161,15 @@ llama_context::llama_context(
     cparams.n_batch = cparams.causal_attn ? std::min(cparams.n_ctx, params.n_batch) : params.n_batch;
 
     cparams.n_ubatch = std::min(cparams.n_batch, params.n_ubatch == 0 ? params.n_batch : params.n_ubatch);
+    if (model.arch == LLM_ARCH_DEEPSEEK4) {
+        const char * LLAMA_DSV4_MAX_UBATCH = getenv("LLAMA_DSV4_MAX_UBATCH");
+        const uint32_t dsv4_max_ubatch = LLAMA_DSV4_MAX_UBATCH ? strtoul(LLAMA_DSV4_MAX_UBATCH, nullptr, 10) : 128u;
+        if (dsv4_max_ubatch != 0 && cparams.n_ubatch > dsv4_max_ubatch) {
+            LLAMA_LOG_WARN("%s: DeepSeek4 n_ubatch capped from %u to %u; set LLAMA_DSV4_MAX_UBATCH to override\n",
+                    __func__, cparams.n_ubatch, dsv4_max_ubatch);
+            cparams.n_ubatch = dsv4_max_ubatch;
+        }
+    }
 
     cparams.op_offload = params.op_offload;
     cparams.kv_unified = params.kv_unified;
@@ -404,7 +413,7 @@ void llama_context::sched_reserve() {
 
     const size_t max_nodes = this->graph_max_nodes(n_tokens);
 
-    LLAMA_LOG_DEBUG("%s: max_nodes = %zu\n", __func__, max_nodes);
+    LLAMA_LOG_INFO("%s: max_nodes = %zu\n", __func__, max_nodes);
 
     gf_res_prev.reset(new llm_graph_result(max_nodes));
     gf_res_reserve.reset(new llm_graph_result(max_nodes));
@@ -2074,7 +2083,10 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
         return std::max<uint32_t>(n_tokens * 40, 32u * model.n_tensors());
     }
     if (model.arch == LLM_ARCH_DEEPSEEK4) {
-        return std::max<uint32_t>(4096u, n_tokens * 64 + 32u * model.n_tensors());
+        const char * LLAMA_DSV4_GRAPH_MAX_NODES = getenv("LLAMA_DSV4_GRAPH_MAX_NODES");
+        const uint32_t dsv4_min_nodes = LLAMA_DSV4_GRAPH_MAX_NODES ? strtoul(LLAMA_DSV4_GRAPH_MAX_NODES, nullptr, 10) : 196608u;
+
+        return std::max<uint32_t>(dsv4_min_nodes, n_tokens * 192 + 64u * model.n_tensors());
     }
     uint32_t res = std::max<uint32_t>(1024u, 8u*model.n_tensors());
     for (const auto & lora : model.loras) {

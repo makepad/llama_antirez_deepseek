@@ -3235,6 +3235,10 @@ struct ggml_tensor * ggml_l2_norm_inplace(
 static inline bool ggml_can_mul_mat(const struct ggml_tensor * t0, const struct ggml_tensor * t1) {
     static_assert(GGML_MAX_DIMS == 4, "GGML_MAX_DIMS is not 4 - update this function");
 
+    if (t0->ne[2] == 0 || t0->ne[3] == 0) {
+        return false;
+    }
+
     return (t0->ne[0]           == t1->ne[0])  &&
            (t1->ne[2]%t0->ne[2] == 0)          && // verify t0 is broadcastable
            (t1->ne[3]%t0->ne[3] == 0);
@@ -3638,6 +3642,10 @@ struct ggml_tensor * ggml_reshape_3d(
         int64_t               ne1,
         int64_t               ne2) {
     GGML_ASSERT(ggml_is_contiguous(a));
+    if (ggml_nelements(a) != ne0*ne1*ne2) {
+        GGML_LOG_ERROR("%s: cannot reshape tensor '%s' ne = [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] into [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n",
+                __func__, ggml_get_name(a), a->ne[0], a->ne[1], a->ne[2], a->ne[3], ne0, ne1, ne2);
+    }
     GGML_ASSERT(ggml_nelements(a) == ne0*ne1*ne2);
 
     const int64_t ne[3] = { ne0, ne1, ne2 };

@@ -256,6 +256,7 @@ llama_memory_hybrid_iswa::llama_memory_hybrid_iswa(
 
 llama_memory_context_ptr llama_memory_hybrid_iswa::init_batch(llama_batch_allocr & balloc, uint32_t n_ubatch, bool embd_all) {
     const bool dsv4_compressed = has_dsv4_compressed_kv();
+    const bool dsv4_batch_decode = getenv("LLAMA_DSV4_BATCH_DECODE") != nullptr;
 
     do {
         balloc.split_reset();
@@ -266,7 +267,10 @@ llama_memory_context_ptr llama_memory_hybrid_iswa::init_batch(llama_batch_allocr
         while (true) {
             llama_ubatch ubatch;
 
-            if (dsv4_compressed) {
+            if (dsv4_compressed && dsv4_batch_decode && balloc.get_n_outputs() == balloc.get_n_tokens()) {
+                const bool unified = (mem_attn->get_base()->get_n_stream() == 1);
+                ubatch = balloc.split_equal(n_ubatch, !unified);
+            } else if (dsv4_compressed) {
                 // DeepSeek V4 compressed attention keeps sequence-local compressor
                 // state and compressed cache rows. Process one sequence set per
                 // ubatch while still allowing multi-sequence batches at the API

@@ -964,6 +964,11 @@ llm_build_deepseek4::llm_build_deepseek4(const llama_model & model, const llm_gr
 
         if (compress_ratio == 0) {
             ggml_tensor * k_cache = mctx_swa->get_k(ctx0, il);
+            if (k_cache->ne[3] > 1) {
+                const llama_seq_id seq_id = ubatch.seq_id[0][0];
+                k_cache = ggml_view_3d(ctx0, k_cache, k_cache->ne[0], k_cache->ne[1], k_cache->ne[2],
+                        k_cache->nb[1], k_cache->nb[2], seq_id*k_cache->nb[3]);
+            }
             k_cache = ggml_reshape_3d(ctx0, k_cache, n_embd_head_k, 1, k_cache->ne[2]);
             cur = build_attn_mha(q, k_cache, k_cache, nullptr, inp_attn->get_kq_mask_swa(),
                     layer.attn_sinks, nullptr, kq_scale, il);
@@ -1147,6 +1152,10 @@ llm_build_deepseek4::llm_build_deepseek4(const llama_model & model, const llm_gr
                 }
 
                 ggml_tensor * k_raw = mctx_swa->get_k(ctx0, il);
+                if (k_raw->ne[3] > 1) {
+                    k_raw = ggml_view_3d(ctx0, k_raw, k_raw->ne[0], k_raw->ne[1], k_raw->ne[2],
+                            k_raw->nb[1], k_raw->nb[2], seq_id*k_raw->nb[3]);
+                }
                 k_raw = ggml_reshape_3d(ctx0, k_raw, n_embd_head_k, 1, k_raw->ne[2]);
                 k_all = k_raw;
                 v_all = k_raw;
@@ -1324,7 +1333,12 @@ llm_build_deepseek4::llm_build_deepseek4(const llama_model & model, const llm_gr
         inpL = dsv4_hc_post(ctx0, cur, residual, mix.post, mix.comb, n_embd, n_hc, n_tokens);
         cb(inpL, "hc_ffn_post", il);
     }
-    if (inp_out_ids) {
+    if (n_outputs == 0) {
+        ggml_build_forward_expand(gf, inpL);
+        return;
+    }
+
+    if (inp_out_ids && n_outputs < n_tokens) {
         inpL = ggml_reshape_2d(ctx0, inpL, n_embd * n_hc, n_tokens);
         inpL = ggml_get_rows(ctx0, inpL, inp_out_ids);
         inpL = ggml_reshape_3d(ctx0, inpL, n_embd, n_hc, n_outputs);
@@ -1332,7 +1346,7 @@ llm_build_deepseek4::llm_build_deepseek4(const llama_model & model, const llm_gr
 
     ggml_tensor * cur = dsv4_hc_head(ctx0, inpL,
             model.output_hc_fn, model.output_hc_scale, model.output_hc_base,
-            n_embd, n_hc, inp_out_ids ? n_outputs : n_tokens,
+            n_embd, n_hc, inp_out_ids && n_outputs < n_tokens ? n_outputs : n_tokens,
             norm_rms_eps, hparams.hc_eps);
     cb(cur, "result_hc", -1);
 
