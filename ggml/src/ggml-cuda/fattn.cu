@@ -454,6 +454,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
     // If Turing tensor cores are available, use them:
     if (turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
+        if (Q->ne[0] == 512 && is_decode) {
+            return BEST_FATTN_KERNEL_TILE;
+        }
         if (Q->ne[0] == 512 && !gqa_opt_applies) {
             return BEST_FATTN_KERNEL_TILE;
         }

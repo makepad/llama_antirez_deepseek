@@ -1212,7 +1212,8 @@ static void launch_fattn_tile_switch_ncols2(ggml_backend_cuda_context & ctx, ggm
     const bool nvidia = GGML_CUDA_CC_IS_NVIDIA(ggml_cuda_info().devices[ggml_cuda_get_device()].cc);
     const int gqa_limit = nvidia && gqa_ratio <= 4 && DV <= 256 ? 16 : INT_MAX;
     const bool is_short_kv_tile = Q->ne[1] == 1 && K->ne[1] <= FATTN_KQ_STRIDE;
-    const bool use_gqa_opt = mask && max_bias == 0.0f && Q->ne[1] <= gqa_limit &&
+    const bool use_gqa_opt = !(DKQ == 512 && Q->ne[1] == 1) &&
+        mask && max_bias == 0.0f && Q->ne[1] <= gqa_limit &&
         (is_short_kv_tile || K->ne[1] % FATTN_KQ_STRIDE == 0);
 
     if constexpr (DKQ == 576) {
