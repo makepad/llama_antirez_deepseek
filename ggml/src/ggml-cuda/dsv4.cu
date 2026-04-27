@@ -258,6 +258,33 @@ static __global__ void dsv4_hc_expand_kernel(
     *reinterpret_cast<float *>(dst + d * nb0 + dst_hc * nb1 + t * nb2) = acc;
 }
 
+static __global__ void dsv4_hc_weighted_sum_kernel(
+        const char * __restrict__ x,
+        const char * __restrict__ weights,
+        char       * __restrict__ dst,
+        int64_t n_embd, int64_t n_hc, int64_t n_tokens,
+        int64_t nb_x0, int64_t nb_x1, int64_t nb_x2,
+        int64_t nb_w0, int64_t nb_w1,
+        int64_t nb0, int64_t nb1) {
+    const int64_t gid = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t n_elem = n_embd * n_tokens;
+    if (gid >= n_elem) {
+        return;
+    }
+
+    const int64_t d = gid % n_embd;
+    const int64_t t = gid / n_embd;
+
+    float acc = 0.0f;
+    for (int64_t h = 0; h < n_hc; ++h) {
+        const float xv = *reinterpret_cast<const float *>(x       + d * nb_x0 + h * nb_x1 + t * nb_x2);
+        const float wv = *reinterpret_cast<const float *>(weights + h * nb_w0 + t * nb_w1);
+        acc += xv * wv;
+    }
+
+    *reinterpret_cast<float *>(dst + d * nb0 + t * nb1) = acc;
+}
+
 static __global__ void dsv4_fp8_kv_quantize_kernel(
         const char * __restrict__ src0,
         char       * __restrict__ dst,
@@ -432,6 +459,23 @@ void ggml_cuda_op_dsv4_hc_split_sinkhorn(ggml_backend_cuda_context & ctx, ggml_t
         static_cast<const float *>(dst->src[2]->data),
         static_cast<float *>(dst->data),
         n_hc, sinkhorn_iters, n_rows, mix_hc, eps);
+}
+
+void ggml_cuda_op_dsv4_hc_weighted_sum(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * x       = dst->src[0];
+    const ggml_tensor * weights = dst->src[1];
+
+    const int64_t n_elem = dst->ne[0] * dst->ne[1];
+    const int threads = int(std::min<int64_t>(256, std::max<int64_t>(1, n_elem)));
+    const int blocks = (n_elem + threads - 1) / threads;
+    dsv4_hc_weighted_sum_kernel<<<blocks, threads, 0, ctx.stream()>>>(
+        static_cast<const char *>(x->data),
+        static_cast<const char *>(weights->data),
+        static_cast<char *>(dst->data),
+        dst->ne[0], x->ne[1], dst->ne[1],
+        x->nb[0], x->nb[1], x->nb[2],
+        weights->nb[0], weights->nb[1],
+        dst->nb[0], dst->nb[1]);
 }
 
 void ggml_cuda_op_dsv4_hc_expand(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {

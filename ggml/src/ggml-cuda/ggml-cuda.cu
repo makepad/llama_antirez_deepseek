@@ -2938,6 +2938,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_DSV4_HC_SPLIT_SINKHORN:
             ggml_cuda_op_dsv4_hc_split_sinkhorn(ctx, dst);
             break;
+        case GGML_OP_DSV4_HC_WEIGHTED_SUM:
+            ggml_cuda_op_dsv4_hc_weighted_sum(ctx, dst);
+            break;
         case GGML_OP_DSV4_HC_EXPAND:
             ggml_cuda_op_dsv4_hc_expand(ctx, dst);
             break;
@@ -5240,6 +5243,19 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 op->src[1]->type == GGML_TYPE_F32 &&
                 op->src[2]->type == GGML_TYPE_F32 &&
                 op->type == GGML_TYPE_F32;
+        case GGML_OP_DSV4_HC_WEIGHTED_SUM:
+            return op->src[0]->type == GGML_TYPE_F32 &&
+                op->src[1]->type == GGML_TYPE_F32 &&
+                op->type == GGML_TYPE_F32 &&
+                op->src[0]->ne[0] == op->ne[0] &&
+                op->src[0]->ne[1] == op->src[1]->ne[0] &&
+                op->src[0]->ne[2] == op->ne[1] &&
+                op->src[1]->ne[1] == op->ne[1] &&
+                op->src[0]->ne[3] == 1 &&
+                op->src[1]->ne[2] == 1 &&
+                op->src[1]->ne[3] == 1 &&
+                op->ne[2] == 1 &&
+                op->ne[3] == 1;
         case GGML_OP_DSV4_HC_EXPAND:
             return op->src[0]->type == GGML_TYPE_F32 &&
                 op->src[1]->type == GGML_TYPE_F32 &&
