@@ -163,7 +163,7 @@ llama_context::llama_context(
     cparams.n_ubatch = std::min(cparams.n_batch, params.n_ubatch == 0 ? params.n_batch : params.n_ubatch);
     if (model.arch == LLM_ARCH_DEEPSEEK4) {
         const char * LLAMA_DSV4_MAX_UBATCH = getenv("LLAMA_DSV4_MAX_UBATCH");
-        const uint32_t dsv4_max_ubatch = LLAMA_DSV4_MAX_UBATCH ? strtoul(LLAMA_DSV4_MAX_UBATCH, nullptr, 10) : 128u;
+        const uint32_t dsv4_max_ubatch = LLAMA_DSV4_MAX_UBATCH ? strtoul(LLAMA_DSV4_MAX_UBATCH, nullptr, 10) : 512u;
         if (dsv4_max_ubatch != 0 && cparams.n_ubatch > dsv4_max_ubatch) {
             LLAMA_LOG_WARN("%s: DeepSeek4 n_ubatch capped from %u to %u; set LLAMA_DSV4_MAX_UBATCH to override\n",
                     __func__, cparams.n_ubatch, dsv4_max_ubatch);
@@ -586,9 +586,9 @@ void llama_context::sched_reserve() {
 
     // DeepSeek V4 resumed-prompt chunks use the compressed-attention decode
     // graph, which is larger than the position-zero prefill graph.
-    if (model.arch == LLM_ARCH_DEEPSEEK4 && n_tokens > 1) {
+    if (model.arch == LLM_ARCH_DEEPSEEK4 && n_tokens > 1 && cparams.n_ctx > n_tokens) {
         const llama_pos reserve_pos0 = std::min<llama_pos>(
-                cparams.n_ctx > n_tokens ? cparams.n_ctx - n_tokens : n_tokens,
+                cparams.n_ctx - n_tokens,
                 std::max<uint32_t>(cparams.n_batch, 8u*n_tokens));
         auto * gf = graph_reserve(n_tokens, n_seqs, n_tokens, mctx.get(),
                 model.hparams.no_alloc, nullptr, reserve_pos0);
