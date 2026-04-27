@@ -401,10 +401,6 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
                 ggml_cuda_log_fattn_reject(dst, "V head size mismatch for 512");
                 return BEST_FATTN_KERNEL_NONE;
             }
-            if (!gqa_opt_applies) {
-                ggml_cuda_log_fattn_reject(dst, "gqa_opt_applies=false for 512");
-                return BEST_FATTN_KERNEL_NONE;
-            }
             break;
         case 576:
             if (V->ne[0] != 512) {
@@ -458,6 +454,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
     // If Turing tensor cores are available, use them:
     if (turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
+        if (Q->ne[0] == 512 && !gqa_opt_applies) {
+            return BEST_FATTN_KERNEL_TILE;
+        }
         if (can_use_vector_kernel) {
             if (!ggml_is_quantized(K->type) && !ggml_is_quantized(V->type)) {
                 if (cc >= GGML_CUDA_CC_ADA_LOVELACE && Q->ne[1] == 1 && Q->ne[3] == 1 && !(gqa_ratio > 4 && K->ne[1] >= 8192)) {
