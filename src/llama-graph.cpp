@@ -2028,7 +2028,12 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
     ggml_tensor * cur;
 
-    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
+    // The DeepSeek4 512-wide CUDA FA path is useful for prompt prefill, but
+    // currently corrupts single-token decode logits. Keep decode on the
+    // established non-FA path while preserving the faster prefill path.
+    const bool disable_dsv4_decode_flash_attn =
+        arch == LLM_ARCH_DEEPSEEK4 && q->ne[0] == 512 && n_tokens == 1;
+    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr && !disable_dsv4_decode_flash_attn;
     if (use_flash_attn) {
         GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
 
